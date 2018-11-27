@@ -23,7 +23,7 @@ class sdprelaxation:
     	binom[0] = range(0,self.D+2)
     	for i in range(1,self.n):
     		binom[i] = np.cumsum(binom[i-1])
-    	return binom
+    	return binom.astype(int)
 
 #   Generate the power index set matrix in a recursive manner
 #   Inputs: 
@@ -32,7 +32,8 @@ class sdprelaxation:
 #   Outputs: 
 #   v:          a matrix whose rows are all vectors with ndig digits summing 
 #               up to current value cur
-    def genpower(self,ndig,cur):
+    @staticmethod
+    def genpower(ndig,cur):
 #       Only continue if number of columns is greater than one
         if ndig > 1:
 #           Initialise current row
@@ -42,7 +43,7 @@ class sdprelaxation:
                 r = 0
                 for k in range(cur,-1,-1):
 #                   Recursive call
-                    w = self.genpower(ndig-1,cur-k)
+                    w = sdprelaxation.genpower(ndig-1,cur-k)
                     rd = len(w)
                     v1 = np.hstack((k*np.ones((rd,1)),w))
                     r = r+rd;
@@ -54,7 +55,7 @@ class sdprelaxation:
 #       value equal to cur
         else:
             v = np.array([[cur]])
-        return v
+        return v.astype(int)
  
 #   Create the matrix of powers used to construct the moment and localisation
 #   matrices
@@ -69,14 +70,14 @@ class sdprelaxation:
         for j in range(1,dmm):
             for k in range(0,self.n):
                 base[:,j,k] = base[j,0,k]+base[:,0,k]
-        return base
+        return base.astype(int)
 
 #   Generate all the index arrays and store them as integer values   
     def genind(self):
 #       Generate index arrays
-        self.binom = self.genbinom().astype(int)
-        self.power = self.genpower(self.n+1,self.D)[:,1:].astype(int)
-        self.base = self.genbase().astype(int)
+        self.binom = self.genbinom()
+        self.power = self.genpower(self.n+1,self.D)[:,1:]
+        self.base = self.genbase()
         return None
 
 #   Converts a 3D matrix of powers into a 2D matrix of indices   
@@ -120,7 +121,7 @@ class sdprelaxation:
 #       Find indices of nonzero elements in coefficient vector
         ind = np.nonzero(g)[0]
 #       Find nonzero coefficients
-        cp = -g[ind].toarray()
+        cp = -g[ind]
 #       Find powers for these monomial terms
         ppow = self.power[ind]
 #       Number of nonzero monomial terms
@@ -156,7 +157,7 @@ class sdprelaxation:
 #       Find indices of nonzero elements in coefficient vector
         ind  = np.nonzero(f[0])[0]
 #       Find nonzero coefficients
-        cp = f[0][ind].toarray()
+        cp = f[0][ind]
 #       Find powers for these monomial terms
         ppow = self.power[ind]
 #       Number of nonzero monomial terms
@@ -185,7 +186,7 @@ class sdprelaxation:
 #   c,G,h:  vectors and matrices for the linear conic LP problem 
 #           min c^Tx s.t. Gx+s=h, s>=0, where s is a cone 
 #   dims:   dictionary field defining the structure of the cone s
-    def sdpr(self,obj,n,cons=[],order=None):
+    def sdpr(self,obj,n,ineqcons=[],order=None):
 #       Initialise important variables
         self.n = n
         degrees = [obj[1]]
@@ -215,9 +216,19 @@ class sdprelaxation:
       
         return c,G,h,dims
     
-if __name__ == '__main__':
+    def polyopt(self,obj,n,ineqcons=[],order=None):
+        c,G,h,dims = self.sdpr(obj,n,ineqcons,order)
+        
+        c = matrix(c)
+        G = matrix(G)
+        h = matrix(h)
+        
+        sol = solvers.conelp(c, G, h, dims)
+        
+        return sol
     
-##   Coefficient vector for 2D Styblinski–Tang function  
+if __name__ == '__main__':
+##   Coefficient vector for 2D Styblinski-Tang function  
 #    n = 2
 #    f = csc_matrix((np.array([2.5,2.5,-8.,-8.,0.5,0.5]), (np.array([1,2,3,5,10,14]), np.zeros(6))), shape=(15, 1))
 #    fdegree = 4
@@ -231,33 +242,28 @@ if __name__ == '__main__':
     
 #   Coefficient vector for 2D Rosenbrock function
     n = 2
-    f = csc_matrix((np.array([1.,-2.,1.,100.,-200.,100.]),(np.array([0,1,3,5,7,10]), np.zeros(6))), shape=(15, 1))
+    f = csc_matrix((np.array([1.,-2.,1.,100.,-200.,100.]),(np.array([0,1,3,5,7,10]), np.zeros(6))), shape=(11, 1))
+    f = f.toarray()
     fdegree = 4
     obj = [f,fdegree]
     
-    g0 = csc_matrix((np.array([3.,-1.,-3.,-1.]),(np.array([1,2,3,6]), np.zeros(4))), shape=(15, 1))
+    g0 = csc_matrix((np.array([3.,-1.,-3.,-1.]),(np.array([1,2,3,6]), np.zeros(4))), shape=(7, 1))
+    g0 = g0.toarray()
     g0degree = 3
     con0 = [g0,g0degree]
     
-    g1 = csc_matrix((np.array([-25.,1.,1.]),(np.array([0,3,5]), np.zeros(3))), shape=(15, 1))
+    g1 = np.array([-25.,0.,0.,1.,0.,1.])
     g1degree = 2
     con1 = [g1,g1degree]
     
-    g2 = csc_matrix((np.array([-2.,1.,1.]),(np.array([0,1,2]), np.zeros(3))), shape=(15, 1))
+    g2 = np.array([-2.,1.,1.])
     g2degree = 1
     con2 = [g2,g2degree]
     
     ineqcons = [con0,con1,con2]
     
     ins = sdprelaxation()
-    c,G,h,dims = ins.sdpr(obj,n,ineqcons)
     
-    c = matrix(c)
-    G = matrix(G)
-    h = matrix(h)
-    
-    sol = solvers.conelp(c, G, h, dims)
-    
-    print sol['x']
+    print ins.polyopt(obj,n,ineqcons)
     
     
