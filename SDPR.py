@@ -1,20 +1,22 @@
 import numpy as np
 from scipy.sparse import csc_matrix, vstack
 from cvxopt import matrix, solvers
-
-class sdprelaxation:
+    
+class MomentOpt:
+    
     def __init__(self):
-        self.K = {'l': 0,'q': [],'s': []}
+        self.dims = {'l': 0,'q': [],'s': []}
+        self.n = 0
+        self.degree = 0
+        self.G = None
         self.A = None
         self.binom = None
         self.power = None
         self.base = None
-        self.n = 0
-        self.degree = 0
         self.order = 0
         self.D = 0
         self.tnm = 0
-    
+        
 #   Create the binomial index array used to locate variables from their powers
 #   Outputs: 
 #   binom:      the binomial index array
@@ -43,7 +45,7 @@ class sdprelaxation:
                 r = 0
                 for k in range(cur,-1,-1):
 #                   Recursive call
-                    w = sdprelaxation.genpower(ndig-1,cur-k)
+                    w = MomentOpt.genpower(ndig-1,cur-k)
                     rd = len(w)
                     v1 = np.hstack((k*np.ones((rd,1)),w))
                     r = r+rd;
@@ -104,10 +106,10 @@ class sdprelaxation:
         mpow = self.base
 #       Generate the column index array
         cind = self.pow2ind(mpow).reshape(nmm2)
-#       Build A matrix in compressed column storage using row and column indices
-        self.A = csc_matrix((np.ones((nmm2)), (range(nmm2), cind)), shape=(nmm2, self.tnm+1))
+#       Build G matrix in compressed column storage using row and column indices
+        self.G = csc_matrix((np.ones((nmm2)), (range(nmm2), cind)), shape=(nmm2, self.tnm+1))
 #       Update the dimensions of the cone dictionary
-        self.K['s'] = [nmm]
+        self.dims['s'] = [nmm]
         return None
 
 #   Update the SDP constraint matrix with localisation matrix entries 
@@ -116,12 +118,14 @@ class sdprelaxation:
 #   g:      vector of coefficients describing the polynomial constraint (look
 #           at comments for function "sdpr" for information regarding the 
 #           lexicographic ordering of this coefficient vector)
+#           Further note, g must be written as <= 0, if >= required, multiply
+#           by -1
 #   degree: degree of the polynomial
     def inequalitycon(self,g,degree):
 #       Find indices of nonzero elements in coefficient vector
         ind = np.nonzero(g)[0]
 #       Find nonzero coefficients
-        cp = -g[ind]
+        cp = g[ind]
 #       Find powers for these monomial terms
         ppow = self.power[ind]
 #       Number of nonzero monomial terms
@@ -141,11 +145,46 @@ class sdprelaxation:
         cp = np.tile(cp,(1,nlm2))
         cp = cp.flatten('F')
 #       Append the localisation matrix onto SDP constraint matrix
-        self.A = vstack((self.A,csc_matrix((cp, (rind, cind)), shape=(nlm2, self.tnm+1)))).tocsr()
+        self.G = vstack((self.G,csc_matrix((cp, (rind, cind)), shape=(nlm2, self.tnm+1)))).tocsr()
 #       Update the dimensions of the cone dictionary
-        self.K['s'].append(nlm)
+        self.dims['s'].append(nlm)
         return None
- 
+   
+#   Update the SDP constraint matrix with localisation matrix entries 
+#   containing inequality constraint information
+#   Inputs:
+#   g:      vector of coefficients describing the polynomial constraint (look
+#           at comments for function "sdpr" for information regarding the 
+#           lexicographic ordering of this coefficient vector)
+#           Further note, g must be written as <= 0, if >= required, multiply
+#           by -1
+#   degree: degree of the polynomial
+    def equalitycon(self,g,degree):
+#       Find indices of nonzero elements in coefficient vector
+        ind = np.nonzero(g)[0]        
+#       Find nonzero coefficients
+        cp = g[ind]
+#       Find powers for these monomial terms
+        ppow = self.power[ind]
+#       Number of nonzero monomial terms
+        nmon = len(ind) 
+        ppow = ppow.reshape((nmon,1,self.n))
+#       Determine the dimensions of the matrix
+        nlm = self.binom[-1,1+2*self.order-degree] 
+        mpow = self.power[0:nlm,:]
+        mpow = mpow.reshape((1,nlm,self.n))
+#       Localise the index information
+        ppow = np.tile(mpow,(nmon,1,1))+np.tile(ppow,(1,nlm,1)) 
+#       Determine the column indices
+        cind = self.pow2ind(ppow).flatten('F')
+#       Row indices
+        rind = np.tile(range(nlm),(nmon,1)).flatten('F')
+        cp = np.tile(cp,(1,nlm))
+        cp = cp.flatten('F')
+#       Append the localisation matrix onto SDP constraint matrix
+        self.A = vstack((self.A,csc_matrix((cp, (rind, cind)), shape=(nlm, self.tnm+1)))).tocsr()
+        return None
+      
 #   Take objective function coefficients and create the linear objective 
 #   function for the conic LP
 #   Inputs:
@@ -186,7 +225,7 @@ class sdprelaxation:
 #   c,G,h:  vectors and matrices for the linear conic LP problem 
 #           min c^Tx s.t. Gx+s=h, s>=0, where s is a cone 
 #   dims:   dictionary field defining the structure of the cone s
-    def sdpr(self,obj,n,ineqcons=[],order=None):
+    def constructsdp(self,obj,n,ineqcons=[],eqcons=[],order=None):
 #       Initialise important variables
         self.n = n
         degrees = [obj[1]]
@@ -208,29 +247,43 @@ class sdprelaxation:
 #       SDP constraint matrix
         for con in ineqcons:
             self.inequalitycon(con[0],con[1])
+        for con in eqcons:
+            self.equalitycon(con[0],con[1])
 #       Define the vectors and matrices for the linear conic LP problem 
-        c = self.conicobj(obj)[1:]
-        G = -self.A[:,2:].toarray()
-        h = self.A[:,1].toarray()
-        dims = self.K
-      
-        return c,G,h,dims
+        c = matrix(self.conicobj(obj)[1:])
+        G = matrix(-self.G[:,2:].toarray())
+        h = matrix(self.G[:,1].toarray())
+        dims = self.dims
+        if self.A is not None:
+            A = matrix(-self.A[:,2:].toarray())
+            b = matrix(self.A[:,1].toarray())
+        else:
+            A = None
+            b = None  
+        return c,G,h,A,b,dims
     
-    def polyopt(self,obj,n,ineqcons=[],order=None):
-        c,G,h,dims = self.sdpr(obj,n,ineqcons,order)
+    def optimise(self,obj,n,order=None,ineqcons=[],eqcons=[]):
+        c,G,h,A,b,dims = self.constructsdp(obj,n,ineqcons,eqcons,order)
         
-        c = matrix(c)
-        G = matrix(G)
-        h = matrix(h)
+        sol = solvers.conelp(c, G, h, dims, A, b)
         
-        sol = solvers.conelp(c, G, h, dims)
-        
-        return sol
+        solution = {'status': None, 'objective': None, 'iterations': None, 'xopt': None}
+        solution['status'] = sol['status']
+        solution['iterations'] = sol['iterations']
+        if solution['status'] is 'optimal':
+            solution['objective'] = sol['primal objective'] + obj[0][0,0]
+            solution['xopt'] = np.array(sol['x'][:n])
+            return solution
+        else:
+            return solution
     
 if __name__ == '__main__':
+    test = MomentOpt()
+
 ##   Coefficient vector for 2D Styblinski-Tang function  
 #    n = 2
-#    f = csc_matrix((np.array([2.5,2.5,-8.,-8.,0.5,0.5]), (np.array([1,2,3,5,10,14]), np.zeros(6))), shape=(15, 1))
+#    f = csc_matrix((np.array([2.5,2.5,-8.,-8.,0.5,0.5]), (np.array([1,2,3,5,10,14]), np.zeros(6))), shape=(15,1))
+#    f = f.toarray()
 #    fdegree = 4
 #    obj = [f,fdegree]
     
@@ -242,28 +295,50 @@ if __name__ == '__main__':
     
 #   Coefficient vector for 2D Rosenbrock function
     n = 2
-    f = csc_matrix((np.array([1.,-2.,1.,100.,-200.,100.]),(np.array([0,1,3,5,7,10]), np.zeros(6))), shape=(11, 1))
-    f = f.toarray()
-    fdegree = 4
-    obj = [f,fdegree]
+    f = csc_matrix((np.array([1.,-2.,1.,100.,-200.,100.]),(np.array([0,1,3,5,7,10]), np.zeros(6))), shape=(11, 1)).toarray()
+    obj = [f,4]
     
-    g0 = csc_matrix((np.array([3.,-1.,-3.,-1.]),(np.array([1,2,3,6]), np.zeros(4))), shape=(7, 1))
-    g0 = g0.toarray()
-    g0degree = 3
-    con0 = [g0,g0degree]
+##   Constraints
+#    g0 = csc_matrix((np.array([-16.,6.,1.,1.]),(np.array([0,1,3,5]), np.zeros(4))), shape=(6, 1))
+#    g0 = g0.toarray()
+#    g0degree = 2
+#    con0 = [g0,g0degree]
+#    
+#    g1 = csc_matrix((np.array([-16.,-6.,1.,1.]),(np.array([0,1,3,5]), np.zeros(4))), shape=(6, 1))
+#    g1 = g1.toarray()
+#    g1degree = 2
+#    con1 = [g1,g1degree]
+#    
     
-    g1 = np.array([-25.,0.,0.,1.,0.,1.])
-    g1degree = 2
-    con1 = [g1,g1degree]
+    g0 = csc_matrix((np.array([1.]),(np.array([1]), np.zeros(1))), shape=(3, 1)).toarray()
+    incon0 = [g0,1]
     
-    g2 = np.array([-2.,1.,1.])
-    g2degree = 1
-    con2 = [g2,g2degree]
+    g1 = csc_matrix((np.array([1.]),(np.array([2]), np.zeros(1))), shape=(3, 1)).toarray()
+    incon1 = [g1,1]
     
-    ineqcons = [con0,con1,con2]
+    g3 = csc_matrix((np.array([-2,1.]),(np.array([1,2]), np.zeros(2))), shape=(3, 1)).toarray()
+    eqcon0 = [g3,1]
     
-    ins = sdprelaxation()
+#    g0 = csc_matrix((np.array([2.,6.,-1.,-1.]),(np.array([0,1,2,3]), np.zeros(4))), shape=(6, 1))
+#    g0 = g0.toarray()
+#    g0degree = 2
+#    con0 = [g0,g0degree]
+##    p0 = np.array([-2,-6,1])
+#    
+#    g1 = csc_matrix((np.array([3.,-6.,-1.,1.]),(np.array([0,1,2,3]), np.zeros(4))), shape=(6, 1))
+#    g1 = g1.toarray()
+#    g1degree = 2
+#    con1 = [g1,g1degree]
+#    p1 = np.array([3,-6,1])
+##    
+    ineqcons = [incon0,incon1]
     
-    print ins.polyopt(obj,n,ineqcons)
+    eqcons = [eqcon0]
     
+#   Solve the optimisation problem
+    
+    xopt = test.optimise(obj,n,order=2,ineqcons=ineqcons,eqcons=eqcons)
+    
+    print xopt
+
     
